@@ -29,11 +29,20 @@ def pick_port(start=5070):
     for port in range(start, start + 20):
         with socket.socket() as sock:
             try:
-                sock.bind(("127.0.0.1", port))
+                sock.bind(("0.0.0.0", port))
             except OSError:
                 continue
             return port
     return start
+
+
+def lan_ip():
+    try:
+        with socket.socket() as sock:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+    except OSError:
+        return ""
 
 
 def safe_name(name, used):
@@ -196,19 +205,23 @@ def too_large(_exc):
 def serve():
     os.makedirs(WORK, exist_ok=True)
     port = pick_port()
-    url = "http://127.0.0.1:%d" % port
+    local = "http://127.0.0.1:%d" % port
     print("=" * 66)
     print("   SAP EQUIPMENT EXTRACTOR")
     print("   Open this address in your browser:")
-    print("   %s" % url)
+    print("   %s" % local)
+    other = lan_ip()
+    if other:
+        print("   Other PCs on this network:")
+        print("   http://%s:%d" % (other, port))
     print("   Press Ctrl+C to stop.")
     print("=" * 66)
-    threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    threading.Timer(0.8, lambda: webbrowser.open(local)).start()
     try:
         from waitress import serve as waitress_serve
-        waitress_serve(app, host="127.0.0.1", port=port, threads=8, channel_timeout=7200)
+        waitress_serve(app, host="0.0.0.0", port=port, threads=8, channel_timeout=7200)
     except ImportError:
-        app.run(host="127.0.0.1", port=port, threaded=True, use_reloader=False)
+        app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
 
 
 if __name__ == "__main__":
