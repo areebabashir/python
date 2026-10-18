@@ -1,0 +1,107 @@
+:root {
+  --ink: #241910;
+  --muted: #6d5c4d;
+  --paper: #f4efe6;
+  --card: #fffaf3;
+  --line: #e2d3c1;
+  --oxide: #9a3412;
+  --oxide-deep: #7c2d12;
+  --brass: #b7791f;
+  --warn: #7c4a12;
+  --warn-bg: #fff4df;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top left, #fff 0, transparent 28%),
+    linear-gradient(180deg, #f7f1e8 0%, var(--paper) 40%, #efe4d4 100%);
+  font: 16px/1.45 "Segoe UI", "Palatino Linotype", serif;
+}
+main { width: min(1080px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 64px; }
+.mast { padding-bottom: 8px; }
+.eyebrow {
+  margin: 0;
+  color: var(--oxide);
+  font: 600 12px/1 "Segoe UI", sans-serif;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+h1 { margin: 8px 0 6px; font: 600 40px/1.05 "Palatino Linotype", Georgia, serif; }
+.deck { max-width: 62ch; margin: 0; color: var(--muted); }
+.warn {
+  margin: 16px 0 0;
+  padding: 10px 12px;
+  border-left: 4px solid var(--brass);
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+.board {
+  display: grid;
+  grid-template-columns: 1.2fr 0.9fr 0.8fr;
+  gap: 14px;
+  margin-top: 22px;
+}
+.step {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 16px;
+  box-shadow: 0 10px 30px rgba(90, 55, 25, 0.05);
+}
+h2 { display: flex; gap: 8px; align-items: center; margin: 0 0 12px; font: 600 18px/1 "Palatino Linotype", Georgia, serif; }
+h2 span {
+  display: grid; place-items: center; width: 26px; height: 26px;
+  border-radius: 50%; background: #2b2118; color: #f6e7c1; font: 600 13px/1 "Segoe UI", sans-serif;
+}
+.drop {
+  border: 1.5px dashed #c9b39a;
+  border-radius: 14px;
+  padding: 18px 14px;
+  background: #fff;
+  cursor: pointer;
+}
+.drop.is-hot { border-color: var(--oxide); background: #fff7ed; }
+.drop strong { display: block; }
+.drop p, .hint { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+.actions { display: flex; gap: 8px; margin-top: 10px; }
+.btn {
+  border: 0; border-radius: 999px; padding: 9px 14px; cursor: pointer;
+  font: 600 14px/1 "Segoe UI", sans-serif; text-decoration: none;
+}
+.btn.ghost { background: #f3e6d6; color: var(--ink); }
+.btn.go { background: var(--oxide); color: white; }
+.btn.go:hover { background: var(--oxide-deep); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.files { list-style: none; margin: 12px 0 0; padding: 0; max-height: 160px; overflow: auto; }
+.files li { padding: 6px 0; border-top: 1px solid var(--line); font-size: 14px; word-break: break-all; }
+.file-pick { display: block; font-size: 14px; font-weight: 600; }
+.file-pick input { display: block; margin-top: 6px; font-weight: 400; }
+.modes { display: grid; gap: 8px; margin-top: 14px; }
+.modes label {
+  display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto;
+  column-gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 12px; background: #fff;
+}
+.modes input { grid-row: 1 / span 2; margin-top: 4px; }
+.modes b { font-size: 14px; }
+.modes small { color: var(--muted); }
+.progress { margin-top: 14px; }
+.track { height: 8px; border-radius: 99px; background: #efe2d2; overflow: hidden; }
+.track span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--brass), var(--oxide)); }
+.log {
+  margin: 10px 0 0; max-height: 140px; overflow: auto; white-space: pre-wrap;
+  font: 12px/1.4 Consolas, monospace; color: #4b3b2e;
+}
+.results { margin-top: 22px; }
+.results-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.results-head h2 { margin: 0; }
+.table-wrap { overflow: auto; margin-top: 10px; border: 1px solid var(--line); border-radius: 14px; background: white; }
+table { border-collapse: collapse; width: 100%; min-width: 860px; font-size: 14px; }
+th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th { background: #2b2118; color: #f6e7c1; font: 600 12px/1.2 "Segoe UI", sans-serif; position: sticky; top: 0; }
+tr.review td { background: #fff7df; }
+@media (max-width: 900px) {
+  .board { grid-template-columns: 1fr; }
+  h1 { font-size: 32px; }
+}

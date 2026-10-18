@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SAP Equipment Extractor</title>
+  <link rel="stylesheet" href="/static/sap.css">
+</head>
+<body>
+  <main>
+    <header class="mast">
+      <p class="eyebrow">Vendor documents · MDR · certificates</p>
+      <h1>SAP Equipment Extractor</h1>
+      <p class="deck">One row per tag: equipment, manufacturer, model, serial number, and part number, with the file and page each value came from.</p>
+ 
+    <p id="ocr-note" class="warn" hidden>Tesseract OCR is not installed, so scanned pages cannot be read. Text PDFs still work. Install Tesseract, then start this page again.</p>
+    <p id="banner" class="warn" hidden></p>
+
+    <section class="board">
+      <article class="step">
+        <h2><span>1</span> Documents</h2>
+        <div class="drop" id="drop" tabindex="0" role="button">
+          <strong>Drop PDFs here</strong>
+          <p>One file, several files, or a folder.</p>
+        </div>
+        <div class="actions">
+          <button type="button" class="btn ghost" id="pick-files">Add PDFs</button>
+          <button type="button" class="btn ghost" id="pick-folder">Add folder</button>
+          <input id="file-input" type="file" accept=".pdf,application/pdf" multiple hidden>
+          <input id="folder-input" type="file" webkitdirectory directory multiple hidden>
+        </div>
+        <ul id="file-list" class="files" hidden></ul>
+      </article>
+
+      <article class="step">
+        <h2><span>2</span> How to read</h2>
+        <label class="file-pick">
+          <span>Tag list, optional</span>
+          <input id="taglist" type="file" accept=".xlsx,.xlsm,.csv,.txt">
+        </label>
+        <p class="hint" id="taglist-name">A list of real tag numbers makes a scanned reading more accurate.</p>
+        <div class="modes" role="radiogroup" aria-label="Reading mode">
+          <label><input type="radio" name="mode" value="fast"> <b>Fast</b><small>Quick pass</small></label>
+          <label><input type="radio" name="mode" value="normal" checked> <b>Normal</b><small>Recommended</small></label>
+          <label><input type="radio" name="mode" value="thorough"> <b>Thorough</b><small>Poor scans</small></label>
+        </div>
+      </article>
+
+      <article class="step">
+        <h2><span>3</span> Extract</h2>
+        <button type="button" class="btn go" id="start" disabled>Start extraction</button>
+        <div id="progress" class="progress" hidden>
+          <div class="track"><span id="bar"></span></div>
+          <p id="progress-copy">Reading pages…</p>
+        </div>
+        <pre id="log" class="log" hidden></pre>
+      </article>
+    </section>
+
+    <section id="results" class="results" hidden>
+      <div class="results-head">
+        <h2 id="result-title">Equipment</h2>
+        <a class="btn go" id="download" href="#" hidden>Download Excel</a>
+      </div>
+      <p id="result-note" class="hint"></p>
+      <div class="table-wrap">
+        <table id="grid"></table>
+      </div>
+    </section>
+  </main>
+  <script src="/static/sap.js"></script>
+</body>
+</html>
