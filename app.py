@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Browser window for sap_equipment_extractor.py. The extractor is not changed."""
+"""SAP Equipment Extractor web app. Run: python app.py"""
 
 import os
 import socket
@@ -204,19 +204,21 @@ def too_large(_exc):
 
 def serve():
     os.makedirs(WORK, exist_ok=True)
-    port = pick_port()
+    given = os.environ.get("PORT")
+    port = int(given) if given else pick_port()
     local = "http://127.0.0.1:%d" % port
     print("=" * 66)
     print("   SAP EQUIPMENT EXTRACTOR")
     print("   Open this address in your browser:")
     print("   %s" % local)
-    other = lan_ip()
-    if other:
-        print("   Other PCs on this network:")
-        print("   http://%s:%d" % (other, port))
+    if not given:
+        other = lan_ip()
+        if other:
+            print("   Other PCs on this network:")
+            print("   http://%s:%d" % (other, port))
+        threading.Timer(0.8, lambda: webbrowser.open(local)).start()
     print("   Press Ctrl+C to stop.")
     print("=" * 66)
-    threading.Timer(0.8, lambda: webbrowser.open(local)).start()
     try:
         from waitress import serve as waitress_serve
         waitress_serve(app, host="0.0.0.0", port=port, threads=8, channel_timeout=7200)

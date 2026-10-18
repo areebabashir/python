@@ -1,6 +1,6 @@
 @echo off
 cd /d "%~dp0"
-python sap_web.py
+python app.py
 if errorlevel 1 (
   echo.
   echo The app stopped. If packages are missing, run:
