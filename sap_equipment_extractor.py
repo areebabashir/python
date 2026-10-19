@@ -58,6 +58,7 @@ import traceback
 from collections import defaultdict, Counter
 from dataclasses import dataclass, field, asdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 
 import shutil
 import subprocess
@@ -504,8 +505,12 @@ def extract_from_line(line, next_lines, conf, base):
 #  OCR helpers
 # -----------------------------------------------------------------------------
 def to_gray(page, dpi):
+    """Render a page for OCR, keeping the long edge small enough to stay in memory."""
+    long_pt = max(float(page.rect.width), float(page.rect.height)) or 1.0
+    dpi = min(int(dpi), max(96, int(4200 * 72 / long_pt)))
     pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY)
-    return np.frombuffer(pix.samples, np.uint8).reshape(pix.h, pix.w).copy()
+    image = np.frombuffer(pix.samples, np.uint8).reshape(pix.h, pix.w).copy()
+    return image
 
 
 def rotate(img, deg):
@@ -892,6 +897,7 @@ def process_page(path, pno, dpi=300, mode="normal", tesseract_cmd=None):
     fname = os.path.basename(path)
     res = {"file": fname, "path": path, "page": pno + 1, "method": "", "rotation": 0,
            "lines": [], "findings": [], "error": ""}
+    doc = None
     try:
         doc = pymupdf.open(path)
         page = doc[pno]
@@ -946,6 +952,9 @@ def process_page(path, pno, dpi=300, mode="normal", tesseract_cmd=None):
     except Exception as e:
         res["error"] = f"{type(e).__name__}: {e}"
         res["trace"] = traceback.format_exc()
+    finally:
+        if doc is not None:
+            doc.close()
     return res
 
 
@@ -1595,32 +1604,76 @@ def run(inputs, output=None, taglist=None, recursive=False, mode="normal", dpi=3
         log(f"Master tag list: {len(master)} tags")
     jobs = []
     for p in pdfs:
+        doc = None
         try:
-            n = len(pymupdf.open(p))
+            doc = pymupdf.open(p)
+            n = len(doc)
         except Exception as e:
             log(f"!! cannot open {p}: {e}")
             continue
+        finally:
+            if doc is not None:
+                doc.close()
         jobs += [(p, i) for i in range(n)]
     log(f"{len(pdfs)} PDF file(s), {len(jobs)} page(s) to read ...")
-    workers = workers or (os.cpu_count() or 2 if IN_COLAB else max(1, (os.cpu_count() or 2) - 1))
+    if workers is None:
+        cpu = os.cpu_count() or 2
+        workers = cpu if IN_COLAB else max(1, cpu - 1)
+    workers = max(1, int(workers))
+    # A large drawing rendered for OCR can use hundreds of MB. One page at a
+    # time keeps a long PDF from killing the worker.
+    if len(jobs) >= 8:
+        workers = 1
+        log("Large file: reading one page at a time.")
     results = []
     done = 0
-    ctx = None
-    if sys.platform.startswith("linux"):
-        import multiprocessing
-        ctx = multiprocessing.get_context("fork")   # works inside Colab / Jupyter notebooks
-    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
-        futs = {ex.submit(process_page, p, i, dpi, mode, tcmd): (p, i) for p, i in jobs}
-        for fu in as_completed(futs):
-            r = fu.result()
-            results.append(r)
-            done += 1
-            if r["error"]:
-                log(f"  !! {r['file']} p{r['page']}: {r['error']}")
-            if progress:
-                progress(done, len(jobs))
-            if done % 5 == 0 or done == len(jobs):
-                log(f"  {done}/{len(jobs)} pages done")
+
+    def note(record):
+        nonlocal done
+        results.append(record)
+        done += 1
+        if record.get("error"):
+            log(f"  !! {record['file']} p{record['page']}: {record['error']}")
+        if progress:
+            progress(done, len(jobs))
+        if done % 5 == 0 or done == len(jobs):
+            log(f"  {done}/{len(jobs)} pages done")
+
+    def blank(path, pno, message):
+        return {"file": os.path.basename(path), "path": path, "page": pno + 1, "method": "",
+                "rotation": 0, "lines": [], "findings": [], "error": message}
+
+    def pool_kwargs(count):
+        ctx = None
+        if sys.platform.startswith("linux"):
+            import multiprocessing
+            ctx = multiprocessing.get_context("fork")
+        opts = {"max_workers": count, "mp_context": ctx}
+        if sys.version_info >= (3, 11):
+            opts["max_tasks_per_child"] = 1
+        return opts
+
+    pending = list(jobs)
+    while pending:
+        finished = set()
+        try:
+            with ProcessPoolExecutor(**pool_kwargs(workers)) as ex:
+                futs = {ex.submit(process_page, p, i, dpi, mode, tcmd): (p, i) for p, i in pending}
+                for fu in as_completed(futs):
+                    key = futs[fu]
+                    note(fu.result())
+                    finished.add(key)
+            pending = []
+        except BrokenProcessPool:
+            pending = [item for item in pending if item not in finished]
+            if not pending:
+                break
+            if workers > 1:
+                workers = 1
+                log("Reading the rest one page at a time.")
+                continue
+            path, pno = pending.pop(0)
+            note(blank(path, pno, "This page ran out of memory and was skipped."))
     results.sort(key=lambda r: (r["file"], r["page"]))
 
     findings, formats = postprocess(results, master)
