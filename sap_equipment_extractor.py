@@ -58,10 +58,10 @@ import traceback
 from collections import defaultdict, Counter
 from dataclasses import dataclass, field, asdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from concurrent.futures.process import BrokenProcessPool
 
 import shutil
 import subprocess
+import threading
 
 
 def _in_colab():
@@ -504,13 +504,18 @@ def extract_from_line(line, next_lines, conf, base):
 # -----------------------------------------------------------------------------
 #  OCR helpers
 # -----------------------------------------------------------------------------
+MAX_PAGE_PIXELS = 18_000_000     # ~A4 at 360 dpi; bigger pages (A3/A1 drawings) are rendered smaller
+MAX_PAGE_SIDE = 6000
+TESSERACT_TIMEOUT = 180          # seconds per OCR call; a stuck page is skipped instead of freezing everything
+
+
 def to_gray(page, dpi):
-    """Render a page for OCR, keeping the long edge small enough to stay in memory."""
-    long_pt = max(float(page.rect.width), float(page.rect.height)) or 1.0
-    dpi = min(int(dpi), max(96, int(4200 * 72 / long_pt)))
+    w_in, h_in = page.rect.width / 72.0, page.rect.height / 72.0
+    if w_in > 0 and h_in > 0:
+        dpi = min(dpi, (MAX_PAGE_PIXELS / (w_in * h_in)) ** 0.5, MAX_PAGE_SIDE / max(w_in, h_in))
+        dpi = int(max(dpi, 72))
     pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY)
-    image = np.frombuffer(pix.samples, np.uint8).reshape(pix.h, pix.w).copy()
-    return image
+    return np.frombuffer(pix.samples, np.uint8).reshape(pix.h, pix.w).copy()
 
 
 def rotate(img, deg):
@@ -524,7 +529,8 @@ def rotate(img, deg):
 
 
 def mean_conf(img, psm=6):
-    d = pytesseract.image_to_data(img, config=f"--psm {psm}", output_type=pytesseract.Output.DICT)
+    d = pytesseract.image_to_data(img, config=f"--psm {psm}", output_type=pytesseract.Output.DICT,
+                                  timeout=TESSERACT_TIMEOUT)
     c = [float(x) for x, t in zip(d["conf"], d["text"]) if float(x) >= 0 and len(t.strip()) > 1]
     return (sum(c) / len(c) if c else 0.0), len(c)
 
@@ -534,7 +540,7 @@ def best_rotation(img):
     small = cv2.resize(img, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
     cands = [0]
     try:
-        osd = pytesseract.image_to_osd(small, output_type=pytesseract.Output.DICT)
+        osd = pytesseract.image_to_osd(small, output_type=pytesseract.Output.DICT, timeout=TESSERACT_TIMEOUT)
         if osd.get("rotate", 0):
             cands.append(int(osd["rotate"]))
     except Exception:
@@ -552,7 +558,8 @@ def best_rotation(img):
 
 def ocr_lines(img, psm=6):
     """OCR -> (list of (line_text, mean_conf), list of word boxes (x, y, w, h, text, conf))."""
-    d = pytesseract.image_to_data(img, config=f"--psm {psm}", output_type=pytesseract.Output.DICT)
+    d = pytesseract.image_to_data(img, config=f"--psm {psm}", output_type=pytesseract.Output.DICT,
+                                  timeout=TESSERACT_TIMEOUT)
     lines = defaultdict(list)
     words = []
     for i, t in enumerate(d["text"]):
@@ -575,7 +582,8 @@ def ocr_cell(crop, psm=7, scale=1.0, otsu=False):
         crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     if otsu:
         crop = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-    d = pytesseract.image_to_data(crop, config=f"--psm {psm}", output_type=pytesseract.Output.DICT)
+    d = pytesseract.image_to_data(crop, config=f"--psm {psm}", output_type=pytesseract.Output.DICT,
+                                  timeout=60)
     words = [(t, float(c)) for t, c in zip(d["text"], d["conf"]) if t.strip()]
     txt = " ".join(t for t, _ in words)
     cs = [c for _, c in words if c >= 0]
@@ -891,39 +899,44 @@ def extract_tables_text(page, base):
 # -----------------------------------------------------------------------------
 #  page processing (runs in worker processes)
 # -----------------------------------------------------------------------------
+_PDF_LOCK = threading.Lock()
+_STANDALONE = False          # set to True by main()
+
+
 def process_page(path, pno, dpi=300, mode="normal", tesseract_cmd=None):
     if tesseract_cmd:
         pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
     fname = os.path.basename(path)
     res = {"file": fname, "path": path, "page": pno + 1, "method": "", "rotation": 0,
            "lines": [], "findings": [], "error": ""}
-    doc = None
     try:
-        doc = pymupdf.open(path)
-        page = doc[pno]
-        native = page.get_text("text") or ""
-        alnum = sum(ch.isalnum() for ch in native)
-        lines = []
-        table_f = []
-        if alnum >= 80:
-            res["method"] = "TEXT"
-            blocks = page.get_text("dict")["blocks"]
-            spans = []
-            for b in blocks:
-                for l in b.get("lines", []):
-                    t = " ".join(s["text"] for s in l["spans"]).strip()
-                    if t:
-                        spans.append((round(l["bbox"][1] / 4), l["bbox"][0], t))
-            rowmap = defaultdict(list)
-            for y, x, t in spans:
-                rowmap[y].append((x, t))
-            for y in sorted(rowmap):
-                lines.append((" ".join(t for _, t in sorted(rowmap[y])), 100.0))
-            base = dict(file=fname, page=pno + 1, method="TEXT-TABLE")
-            table_f = extract_tables_text(page, base)
-        else:
-            res["method"] = "OCR"
-            img = to_gray(page, dpi)
+        lines, table_f, img = [], [], None
+        with _PDF_LOCK:                      # PDF library is not thread-safe -> one page at a time
+            doc = pymupdf.open(path)
+            page = doc[pno]
+            native = page.get_text("text") or ""
+            alnum = sum(ch.isalnum() for ch in native)
+            if alnum >= 80:
+                res["method"] = "TEXT"
+                blocks = page.get_text("dict")["blocks"]
+                spans = []
+                for b in blocks:
+                    for l in b.get("lines", []):
+                        t = " ".join(s["text"] for s in l["spans"]).strip()
+                        if t:
+                            spans.append((round(l["bbox"][1] / 4), l["bbox"][0], t))
+                rowmap = defaultdict(list)
+                for y, x, t in spans:
+                    rowmap[y].append((x, t))
+                for y in sorted(rowmap):
+                    lines.append((" ".join(t for _, t in sorted(rowmap[y])), 100.0))
+                base = dict(file=fname, page=pno + 1, method="TEXT-TABLE")
+                table_f = extract_tables_text(page, base)
+            else:
+                res["method"] = "OCR"
+                img = to_gray(page, dpi)
+            doc.close()
+        if img is not None:
             rot = best_rotation(img)
             res["rotation"] = rot
             img = rotate(img, rot)
@@ -949,12 +962,11 @@ def process_page(path, pno, dpi=300, mode="normal", tesseract_cmd=None):
                                  strength=2, conf=c, context=clean_text(l)[:160]))
             f += extract_from_line(l, [x for x, _ in lines[i + 1:i + 3]], c, base)
         res["findings"] = [asdict(x) for x in f + table_f]
+    except MemoryError:
+        res["error"] = "MemoryError: page too large for available memory - page skipped"
     except Exception as e:
         res["error"] = f"{type(e).__name__}: {e}"
         res["trace"] = traceback.format_exc()
-    finally:
-        if doc is not None:
-            doc.close()
     return res
 
 
@@ -1005,19 +1017,26 @@ def build_tag_map(all_tags_weighted, master_tags=None, tag_pages=None):
     """raw tag -> final tag (snap to master list, else segment / fuzzy consensus)."""
     mapping = {}
     if master_tags:
-        mset = sorted(set(master_tags))
+        # 1) usual OCR consensus clean-up first, 2) then snap to the tag list - but only when the
+        #    difference is a typical OCR mix-up (7/1, 0/8 ...). Real, different tags are never merged.
+        mapping = build_tag_map(all_tags_weighted, None, tag_pages)
+        mset = set(master_tags)
         for t in all_tags_weighted:
-            if t in mset:
+            c = mapping.get(t, t)
+            if t in mset or c in mset:
+                if t in mset:
+                    mapping.pop(t, None)
                 continue
-            best, bd = None, 99
+            cands = []
             for m in mset:
-                d = levenshtein(t, m)
-                if d < bd:
-                    best, bd = m, d
-            if best and bd <= 2:
-                mapping[t] = best
-            else:
-                mapping[t] = None  # not in master list -> dropped (kept in All_Findings)
+                if len(m) != len(c):
+                    continue
+                diff = [(x, y) for x, y in zip(c, m) if x != y]
+                if 0 < len(diff) <= 2 and all(d in _CONFUSABLE for d in diff):
+                    cands.append((len(diff), m))
+            cands.sort()
+            if cands and (len(cands) == 1 or cands[0][0] < cands[1][0]):
+                mapping[t] = cands[0][1]
         return mapping
     # 1. segment snapping
     mapping.update(seg_snap_map(all_tags_weighted))
@@ -1137,6 +1156,11 @@ def postprocess(page_results, master_tags=None):
         if f["field"] == "TAG":
             tpages[f["value"]].add((f["file"], f["page"]))
     tag_map = build_tag_map(tw, master_tags, tpages)
+    if master_tags:
+        mset = set(master_tags)
+        for f in findings:
+            if f["field"] == "TAG" and tag_map.get(f["value"], f["value"]) not in mset:
+                f["note"] = (f["note"] + "; not in tag list").strip("; ")
     for f in findings:
         for k in ("tag",):
             if f[k] and f[k] in tag_map:
@@ -1369,6 +1393,8 @@ def consolidate(findings, formats=()):
 
             tag_src = tags_seen.get(tag, [])
             row["Tag Number - Source (Document / Page)"] = pages_text(tag_src)
+            if tag_src and all("not in tag list" in f.get("note", "") for f in tag_src):
+                review.append("Tag not in your tag list - check it")
             if len({(f["file"], f["page"]) for f in tag_src}) <= 1 and \
                     any("corrected" in f.get("note", "") for f in tag_src):
                 review.append("Tag: OCR auto-corrected")
@@ -1591,7 +1617,7 @@ def collect_pdfs(inputs, recursive=False):
 
 
 def run(inputs, output=None, taglist=None, recursive=False, mode="normal", dpi=300, workers=None,
-        tesseract=None, log=print, progress=None):
+        tesseract=None, log=print, progress=None, use_processes=None):
     tcmd = find_tesseract(tesseract)
     if tcmd:
         pytesseract.pytesseract.tesseract_cmd = tcmd
@@ -1604,76 +1630,61 @@ def run(inputs, output=None, taglist=None, recursive=False, mode="normal", dpi=3
         log(f"Master tag list: {len(master)} tags")
     jobs = []
     for p in pdfs:
-        doc = None
         try:
-            doc = pymupdf.open(p)
-            n = len(doc)
+            n = len(pymupdf.open(p))
         except Exception as e:
             log(f"!! cannot open {p}: {e}")
             continue
-        finally:
-            if doc is not None:
-                doc.close()
         jobs += [(p, i) for i in range(n)]
     log(f"{len(pdfs)} PDF file(s), {len(jobs)} page(s) to read ...")
-    if workers is None:
-        cpu = os.cpu_count() or 2
-        workers = cpu if IN_COLAB else max(1, cpu - 1)
-    workers = max(1, int(workers))
-    # A large drawing rendered for OCR can use hundreds of MB. One page at a
-    # time keeps a long PDF from killing the worker.
-    if len(jobs) >= 8:
-        workers = 1
-        log("Large file: reading one page at a time.")
-    results = []
-    done = 0
+    if use_processes is None:
+        use_processes = _STANDALONE      # True when run directly, False when used by a web page / notebook
+    workers = workers or max(1, min(4, (os.cpu_count() or 2) - (0 if IN_COLAB else 1)))
+    results = {}
 
-    def note(record):
-        nonlocal done
-        results.append(record)
-        done += 1
-        if record.get("error"):
-            log(f"  !! {record['file']} p{record['page']}: {record['error']}")
+    def collect(r):
+        results[(r["path"], r["page"] - 1)] = r
+        if r["error"]:
+            log(f"  !! {r['file']} p{r['page']}: {r['error']}")
         if progress:
-            progress(done, len(jobs))
-        if done % 5 == 0 or done == len(jobs):
-            log(f"  {done}/{len(jobs)} pages done")
+            progress(len(results), len(jobs))
+        if len(results) % 5 == 0 or len(results) == len(jobs):
+            log(f"  {len(results)}/{len(jobs)} pages done")
 
-    def blank(path, pno, message):
-        return {"file": os.path.basename(path), "path": path, "page": pno + 1, "method": "",
-                "rotation": 0, "lines": [], "findings": [], "error": message}
-
-    def pool_kwargs(count):
-        ctx = None
-        if sys.platform.startswith("linux"):
-            import multiprocessing
-            ctx = multiprocessing.get_context("fork")
-        opts = {"max_workers": count, "mp_context": ctx}
-        if sys.version_info >= (3, 11):
-            opts["max_tasks_per_child"] = 1
-        return opts
-
-    pending = list(jobs)
-    while pending:
-        finished = set()
+    # A) separate processes (fastest). Some setups kill or block them - web apps, notebooks,
+    #    antivirus, low memory. Then we simply continue with B) threads in this process.
+    if use_processes and workers > 1 and len(jobs) > 1:
         try:
-            with ProcessPoolExecutor(**pool_kwargs(workers)) as ex:
-                futs = {ex.submit(process_page, p, i, dpi, mode, tcmd): (p, i) for p, i in pending}
+            ctx = None
+            if sys.platform.startswith("linux"):
+                import multiprocessing
+                ctx = multiprocessing.get_context("fork")
+            with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
+                futs = {ex.submit(process_page, p, i, dpi, mode, tcmd): (p, i) for p, i in jobs}
                 for fu in as_completed(futs):
-                    key = futs[fu]
-                    note(fu.result())
-                    finished.add(key)
-            pending = []
-        except BrokenProcessPool:
-            pending = [item for item in pending if item not in finished]
-            if not pending:
-                break
-            if workers > 1:
-                workers = 1
-                log("Reading the rest one page at a time.")
-                continue
-            path, pno = pending.pop(0)
-            note(blank(path, pno, "This page ran out of memory and was skipped."))
+                    collect(fu.result())
+        except Exception as e:
+            log(f"  (parallel processes stopped: {type(e).__name__} - continuing in safe mode, "
+                f"{len(jobs) - len(results)} page(s) left)")
+
+    # B) safe mode: threads inside this process (OCR still runs in parallel)
+    todo = [(p, i) for p, i in jobs if (p, i) not in results]
+    if todo:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(process_page, p, i, dpi, mode, tcmd): (p, i) for p, i in todo}
+            for fu in as_completed(futs):
+                p, i = futs[fu]
+                try:
+                    collect(fu.result())
+                except Exception as e:
+                    collect({"file": os.path.basename(p), "path": p, "page": i + 1, "method": "",
+                             "rotation": 0, "lines": [], "findings": [], "error": f"{type(e).__name__}: {e}"})
+    results = list(results.values())
+    failed = [r for r in results if r["error"]]
+    if failed:
+        log(f"  {len(failed)} page(s) could not be read (see Files_Log sheet): "
+            + ", ".join(f"{r['file']} p{r['page']}" for r in failed[:10]))
     results.sort(key=lambda r: (r["file"], r["page"]))
 
     findings, formats = postprocess(results, master)
@@ -2027,6 +2038,8 @@ def ask_paths_console():
 
 
 def main():
+    global _STANDALONE
+    _STANDALONE = not IN_COLAB
     ap = argparse.ArgumentParser(description="Extract Tag / Manufacturer / Model / Serial / Part No. from PDFs "
                                              "for SAP equipment templates. Opens an upload window.")
     ap.add_argument("inputs", nargs="*", help="(optional) PDFs/folders to pre-load into the window")
